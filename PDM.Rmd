@@ -1,0 +1,628 @@
+---
+title: "Predictive Maintenance"
+author: "Harsh Mehta"
+date: "2024-03-21"
+output:
+  html_document: default
+  word_document: default
+  pdf_document: default
+---
+```{r}
+library("ggplot2")
+library("dplyr")
+library("zoo")
+library("data.table")
+library("gbm")
+
+```
+
+```{r}
+setwd("C:\\Users\\91797\\Downloads\\OneDrive_2024-01-31\\Case Studies\\Case Study in R Language")
+telemetry <- read.csv(file='PdM_telemetry.csv')
+errors <- read.csv(file='PdM_errors.csv')
+maint<-read.csv('PdM_maint.csv')
+failures<-read.csv('PdM_failures.csv')
+machines<-read.csv('PdM_machines.csv')
+
+#telemetry
+#errors
+#maint
+#machines
+#failures
+
+```
+
+
+```{r}
+#Step 1 - DATA PRE-PROCESSING
+#Telemetry: format datetime field which comes in as.character
+telemetry$datetime <- as.POSIXct(telemetry$datetime, format="%Y-%m-%d %H:%M:%S", tz="UTC")
+#Errors: format datetime and errorID fields
+errors$datetime <- as.POSIXct(errors$datetime, format="%Y-%m-%d %H:%M:%S", tz="UTC")
+errors$errorID <- as.factor(errors$errorID)
+#Maintenance: format datetime and comp fields
+maint$datetime <- as.POSIXct(maint$datetime, format="%Y-%m-%d %H:%M:%S", tz="UTC")
+maint$comp <- as.factor(maint$comp)
+#Failures: format datetime and failure fields
+failures$datetime <- as.POSIXct(failures$datetime, format="%Y-%m-%d %H:%M:%S", tz="UTC")
+failures$failure <- as.factor(failures$failure)
+#Machines: format model field
+machines$model <- as.factor(machines$model)
+
+str(telemetry)
+str(errors)
+str(maint)
+str(failures)
+str(machines)
+```
+
+
+```{r}
+#Telemetry
+ggplot(data=telemetry %>% 
+            filter(machineID==1, datetime>=as.POSIXct("2015-01-01"), 
+                   datetime<=as.POSIXct("2015-01-31")), aes(x=datetime, y=volt)) + 
+            geom_line(color="red")+ labs(x="Machine 1 - January 2015", y="volts")
+
+
+#Errors
+ggplot(data=errors, aes(x=errorID))+geom_bar(fill="blue",stat="count")+ 
+  labs(title="Number of errors by Type", x="error types")
+
+ggplot(data=errors %>% filter(machineID==1), aes(x=errorID))+ 
+  geom_bar(fill="orange", stat="count")+ 
+  labs(title="Number of errors by Type for Machine 1", x="error types")
+
+
+#Maintenance
+ggplot(data=maint, aes(x=comp))+ geom_bar(fill="red", stat="count")+ 
+  labs(title="Number of components replaced by type", x="component types")
+
+
+ggplot(data=maint %>% filter(machineID==1), aes(x=comp))+ 
+  geom_bar(fill="red", stat="count")+
+  labs(title="Number of components replaced by type for Machine 1",
+       x="component types")
+
+ggplot(data=maint, aes(x=machineID))+geom_bar(aes(fill=comp),stat="count")+
+  labs(title="Number of components replaced by type for each Machine", 
+       x="machineID")
+
+#Machines
+ggplot(data=machines, aes(x=age))+
+  geom_bar(fill="red", stat="count")+
+  labs(title="Number of Machines of a certain age", x="age")
+
+
+#Failures
+ggplot(data=failures, aes(x=failure))+
+  geom_bar(fill="blue", stat="count")+
+  labs(title="Number of Failures of a certain type", x="failure type")
+
+ggplot(data=failures,  aes(x=machineID))+
+  geom_bar(aes(fill=failure),stat="count")+
+  labs(title="Number of Failures of a certain type for each Machine", 
+       x="machineID")
+
+```
+
+```{r}
+#Step 2 - FEATURE ENGINEERING
+
+
+#FEATURE ENGINEERING: LAG FEATURES FROM TELEMETRY
+telemetrymean<-telemetry %>%
+  arrange(machineID,datetime) %>%
+  group_by(machineID) %>%
+  mutate(voltmean=rollapply(volt, width=3, FUN=mean, align="right", fill=NA, by=3),
+         rotatemean=rollapply(rotate, width=3, FUN=mean, align="right", fill=NA, by=3),
+         pressuremean=rollapply(pressure, width=3, FUN=mean, align="right", fill=NA, by=3),
+         vibrationmean=rollapply(vibration, width=3, FUN=mean, align="right", fill=NA, by=3)) %>%
+  select(datetime, machineID, voltmean, rotatemean, pressuremean, vibrationmean) %>%
+  filter(!is.na(voltmean)) %>%
+  ungroup()
+
+head(telemetrymean)
+```
+
+
+```{r}
+telemetrysd<-telemetry %>%
+  arrange(machineID,datetime) %>%
+  group_by(machineID) %>%
+  mutate(voltsd=rollapply(volt, width=3, FUN=sd, align="right", fill=NA, by=3),
+         rotatesd=rollapply(rotate, width=3, FUN=sd, align="right", fill=NA, by=3),
+         pressuresd=rollapply(pressure, width=3, FUN=sd, align="right", fill=NA, by=3),
+         vibrationsd=rollapply(vibration, width=3, FUN=sd, align="right", fill=NA, by=3)) %>%
+  select(datetime, machineID, voltsd, rotatesd, pressuresd, vibrationsd) %>%
+  filter(!is.na(voltsd)) %>%
+  ungroup()
+
+head(telemetrysd)
+```
+
+```{r}
+telemetrymean_24hours<-telemetry %>%
+  arrange(machineID,datetime) %>%
+  group_by(machineID) %>%
+  mutate(voltmean_24hrs=rollapply(volt, width=24, FUN=mean, align="right", fill=NA, by=3),
+         rotatemean_24hrs=rollapply(rotate, width=24, FUN=mean, align="right", fill=NA, by=3),
+         pressuremean_24hrs=rollapply(pressure, width=24, FUN=mean, align="right", fill=NA, by=3),
+         vibrationmean_24hrs=rollapply(vibration, width=24, FUN=mean, align="right", fill=NA, by=3)) %>%
+  select(datetime, machineID, voltmean_24hrs, rotatemean_24hrs, pressuremean_24hrs, vibrationmean_24hrs) %>%
+  filter(!is.na(voltmean_24hrs)) %>%
+  ungroup()
+
+head(telemetrymean_24hours)
+```
+
+```{r}
+telemetrysd_24hours<-telemetry %>%
+  arrange(machineID,datetime) %>%
+  group_by(machineID) %>%
+  mutate(voltsd_24hrs=rollapply(volt, width=24, FUN=sd, align="right", fill=NA, by=3),
+         rotatesd_24hrs=rollapply(rotate, width=24, FUN=sd, align="right", fill=NA, by=3),
+         pressuresd_24hrs=rollapply(pressure, width=24, FUN=sd, align="right", fill=NA, by=3),
+         vibrationsd_24hrs=rollapply(vibration, width=24, FUN=sd, align="right", fill=NA, by=3)) %>%
+  select(datetime, machineID, voltsd_24hrs, rotatesd_24hrs, pressuresd_24hrs, vibrationsd_24hrs) %>%
+  filter(!is.na(voltsd_24hrs)) %>%
+  ungroup()
+
+head(telemetrysd_24hours)
+```
+
+```{r}
+telemetryfeat<-data.frame(telemetrymean,telemetrysd[,-c(1:2)])
+
+telemetryfeat_24hours<-data.frame(telemetrymean_24hours,telemetrysd_24hours[,-c(1:2)])
+telemetryfeat_final<-telemetryfeat %>% left_join(telemetryfeat_24hours, by=c("datetime", "machineID")) %>% filter(!is.na(voltmean_24hrs))
+```
+
+```{r}
+head(telemetryfeat)
+```
+
+```{r}
+head(telemetryfeat_24hours)
+```
+
+
+```{r}
+head(telemetryfeat_final)
+```
+```{r}
+head(errors)
+```
+
+
+```{r}
+#FEATURE ENGINEERING: LAG FEATURES FROM ERRORS
+#create a column for each error type
+errorcount<-errors %>% select(datetime, machineID, errorID) %>%
+  mutate(error1=as.integer(errorID=="error1"),
+         error2=as.integer(errorID=="error2"),
+         error3=as.integer(errorID=="error3"),
+         error4=as.integer(errorID=="error4"),
+         error5=as.integer(errorID=="error5"))
+head(errorcount)
+```
+
+```{r}
+#sum the duplicate errors in an hour
+errorcount_final<-errorcount %>%
+  group_by(machineID, datetime) %>%
+  summarise(error1sum=sum(error1),
+            error2sum=sum(error2),
+            error3sum=sum(error3),
+            error4sum=sum(error4),
+            error5sum=sum(error5)) %>%
+  ungroup()
+head(errorcount_final)
+```
+
+```{r}
+#align errors with telemetry datetime field
+errorfeat<-telemetry %>%
+  select(datetime, machineID) %>%
+  left_join(errorcount_final, by=c("datetime","machineID"))
+
+head(errorfeat)
+```
+
+```{r}
+#replace missing values
+errorfeat[is.na(errorfeat)] <- 0
+head(errorfeat)
+```
+
+```{r}
+#count the number of errors of different types in the last 24 hours, for every 3 hours
+errorfeat_final<-errorfeat %>%
+  arrange(machineID, datetime) %>%
+  group_by(machineID) %>%
+  mutate(error1count=rollapply(error1sum, width=24, FUN=sum, align="right", fill=NA, by=3),
+         error2count=rollapply(error2sum, width=24, FUN=sum, align="right", fill=NA, by=3),
+         error3count=rollapply(error3sum, width=24, FUN=sum, align="right", fill=NA, by=3),
+         error4count=rollapply(error4sum, width=24, FUN=sum, align="right", fill=NA, by=3),
+         error5count=rollapply(error5sum, width=24, FUN=sum, align="right", fill=NA, by=3)) %>%
+  select(datetime, machineID, error1count, error2count, error3count, error4count, error5count) %>%
+  filter(!is.na(error1count)) %>%
+  ungroup()
+
+head(errorfeat_final)
+```
+
+```{r}
+head(failures)
+```
+
+```{r}
+head(maint)
+```
+
+```{r}
+#FEATURE ENGINEERING: NUMBER OF DAYS SINCE LAST REPLACEMENT FROM MAINTENANCE
+#create a binary column for each component. 1 if a replacement occured, 0 if not.
+comprep <- maint %>%
+    select(datetime, machineID, comp) %>%
+    mutate(comp1=as.integer(comp=="comp1"),
+           comp2=as.integer(comp=="comp2"),
+           comp3=as.integer(comp=="comp3"),
+           comp4=as.integer(comp=="comp4")) %>%
+  select(-comp) 
+head(comprep)
+```
+
+```{r}
+comprep<-as.data.table(comprep)
+setkey(comprep,machineID, datetime)
+
+#separate different component type replacements into different tables
+comp1rep<-comprep[comp1==1, .(machineID, datetime, lastrepcomp1=datetime)]
+comp2rep<-comprep[comp2==1, .(machineID, datetime, lastrepcomp2=datetime)]
+comp3rep<-comprep[comp3==1, .(machineID, datetime, lastrepcomp3=datetime)]
+comp4rep<-comprep[comp4==1, .(machineID, datetime, lastrepcomp4=datetime)]
+
+```
+
+```{r}
+#use telemetry feature table datetime and machineID to be matched with replacements
+compdate <- as.data.table(telemetryfeat_final[,c(1:2)])
+setkey(compdate,machineID, datetime)
+```
+
+```{r}
+#data.table rolling match will attach the latest record from the component replacement tables
+#to the telemetry date time and machineID
+comp1feat<-comp1rep[compdate[,.(machineID, datetime)], roll=TRUE]
+comp1feat$sincelastcomp1<-as.numeric(difftime(comp1feat$datetime, comp1feat$lastrepcomp1, units="days"))
+
+comp2feat<-comp2rep[compdate[,.(machineID, datetime)], roll=TRUE]
+comp2feat$sincelastcomp2<-as.numeric(difftime(comp2feat$datetime, comp2feat$lastrepcomp2, units="days"))
+
+comp3feat<-comp3rep[compdate[,.(machineID, datetime)], roll=TRUE]
+comp3feat$sincelastcomp3<-as.numeric(difftime(comp3feat$datetime, comp3feat$lastrepcomp3, units="days"))
+
+comp4feat<-comp4rep[compdate[,.(machineID, datetime)], roll=TRUE]
+comp4feat$sincelastcomp4<-as.numeric(difftime(comp4feat$datetime, comp4feat$lastrepcomp4, units="days"))
+```
+
+```{r}
+#merge all tables
+compfeat_final<-data.frame(compdate, comp1feat[,.(sincelastcomp1)],comp2feat[,.(sincelastcomp2)],comp3feat[,.(sincelastcomp3)],comp4feat[,.(sincelastcomp4)])
+
+head(compfeat_final)
+```
+
+```{r}
+head(machines)
+```
+
+```{r}
+#FEATURE ENGINEERING: MERGE TELEMETRYFEAT_FINAL, ERRORFEAT_FINAL
+  finalfeat <- data.frame(telemetryfeat_final, errorfeat_final[,-c(1:2)])
+
+#MERGE finalfeat con COMPFEAT_FINAL and machines features
+  finalfeat <- finalfeat %>% 
+    left_join(compfeat_final, by=c("datetime", "machineID")) %>% 
+    left_join(machines, by=c("machineID")) 
+ 
+
+str(finalfeat)
+```
+```{r}
+head(failures)
+```
+
+```{r}
+head(finalfeat)
+```
+
+```{r}
+#Step 3 - LABELING
+# The prediction problem for this example scenario is to estimate the probability 
+# that a machine will fail in the near future due to a failure 
+# of a certain component. More specifically, the goal is to compute the probability 
+# that a machine will fail in the next 24 hours due to a certain 
+# component failure (component 1, 2, 3, or 4). 
+# Below, a categorical failure feature is created to serve as the label. 
+# All records within a 24 hour window before a failure of component 1 have failure=comp1, 
+# and so on for components 2, 3, and 4; 
+# all records not within 24 hours of a component failure have failure=none.
+
+# left join final features with failures on machineID then mutate a column for datetime difference
+# filter date difference for the prediction horizon which is 24 hours
+  
+labeled <- left_join(finalfeat, failures, by = c("machineID")) %>%
+    mutate(datediff = difftime(datetime.y, datetime.x, units = "hours")) %>%
+    filter(datediff <= 24, datediff >= 0)
+head(labeled)
+```
+
+```{r}
+# left join labels to final features and fill NA's with "none" indicating no failure
+labeledfeatures <- left_join(finalfeat, labeled %>% select(datetime.x, machineID, failure),
+                               by = c("datetime" = "datetime.x", "machineID")) %>%
+                               arrange(machineID,datetime)
+```
+
+```{r}
+levels(labeledfeatures$failure) <- c(levels(labeledfeatures$failure), "none")
+labeledfeatures$failure[is.na(labeledfeatures$failure)]<-"none"
+head(labeledfeatures)
+```
+```{r}
+head(labeledfeatures)
+```
+
+```{r}
+#number of records with failure different from none
+length(which(labeledfeatures$failure!="none" ))
+
+# label distribution after features are labeled - the class imbalance problem
+ggplot(labeledfeatures, aes(x=failure)) +
+  geom_bar(fill="red") +
+  labs(title = "label distribution", x = "labels")
+```
+
+```{r}
+#Step 4 - Modelling
+#split at 2015-08-01 01:00:00, first 8 months train, last 4 month test
+trainingdata1 <- labeledfeatures[labeledfeatures$datetime < "2015-07-31 01:00:00",]
+testingdata1 <-labeledfeatures[labeledfeatures$datetime > "2015-08-01 01:00:00",]
+
+#split at 2015-09-01 01:00:00, first 9 months train, last 3 month test
+trainingdata2 <- labeledfeatures[labeledfeatures$datetime < "2015-08-31 01:00:00",]
+testingdata2 <-labeledfeatures[labeledfeatures$datetime > "2015-09-01 01:00:00",]
+
+#split at 2015-10-01 01:00:00, first 8 months train, last 4 month test
+trainingdata3 <- labeledfeatures[labeledfeatures$datetime < "2015-09-30 01:00:00",]
+testingdata3 <-labeledfeatures[labeledfeatures$datetime > "2015-10-01 01:00:00",]
+
+
+
+#create the training formula
+trainformula <-as.formula(paste('failure', paste(names(labeledfeatures)[c(3:29)], collapse=' + '), sep=' ~ '))
+trainformula
+
+```
+```{r}
+set.seed(1234)
+
+gbm_model1 <- gbm(formula=trainformula, data= trainingdata1, distribution="multinomial", n.trees =50, interaction.depth =5, shrinkage =0.1)
+gbm_model2 <- gbm(formula=trainformula, data= trainingdata2, distribution="multinomial", n.trees =50, interaction.depth =5, shrinkage =0.1)
+gbm_model3 <- gbm(formula=trainformula, data= trainingdata3, distribution="multinomial", n.trees =50, interaction.depth =5, shrinkage =0.1)
+```
+
+```{r}
+#print the relative influence of variables for the three models
+gbm_model1
+```
+```{r}
+gbm_model2
+```
+```{r}
+gbm_model3
+```
+
+```{r}
+#print the relative influence of variables for the three models
+summary(gbm_model1)
+```
+
+
+```{r}
+summary(gbm_model2)
+```
+
+
+```{r}
+summary(gbm_model3)
+```
+
+
+```{r}
+#Prediction for the first split
+head(testingdata1)
+```
+
+```{r}
+pred_gbm1 <- as.data.frame(predict(gbm_model1, testingdata1, n.trees = 50,type = "response"))
+names(pred_gbm1) <- gsub(".50", "", names(pred_gbm1))
+pred_gbm1$failure <- as.factor(colnames(pred_gbm1)[max.col(pred_gbm1)])
+head(pred_gbm1)
+```
+
+```{r}
+prediction1<-testingdata1 %>%
+  mutate(failurePredicted=as.factor(pred_gbm1$failure))
+head(prediction1)
+```
+
+```{r}
+#we can analyse the errors in the prediction as done in the following
+
+#FIRST ANALYSIS
+#we can analyse the entire set of predictions of "none" state
+#we can limit the analysis to the datetime, failure and failurePredicted columns
+
+prediction_analysis<-prediction1 %>%
+                             filter(failure=="none" && failurePredicted!="none") %>%
+                             select(datetime, machineID, failure, failurePredicted)
+head(prediction_analysis)
+```
+
+```{r}
+#SECOND ANALYSIS
+#we can analyse the entire set of failure predictions (without "none" state)
+#we can limit the analysis to the datetime, failure and failurePredicted columns
+
+prediction_analysis<-prediction1 %>%
+                             filter(failure!="none") %>%
+                             select(datetime, machineID, failure, failurePredicted)
+head(prediction_analysis)
+```
+
+```{r}
+#we can analyse the wrong predictions
+#we can limit the analysis to the datetime, failure and failurePredicted columns
+prediction_analysis=filter(prediction1, failure!=failurePredicted)
+prediction_analysis=select(prediction_analysis, datetime, machineID, failure, failurePredicted)
+head(prediction_analysis)
+```
+
+```{r}
+#FINAL STEP: EVALUATION
+
+# define evaluate function
+Evaluate<-function(actual=NULL, predicted=NULL, cm=NULL){
+  if(is.null(cm)) {
+    actual = actual[!is.na(actual)]
+    predicted = predicted[!is.na(predicted)]
+    f = factor(union(unique(actual), unique(predicted)))
+    actual = factor(actual, levels = levels(f))
+    predicted = factor(predicted, levels = levels(f))
+    cm = as.matrix(table(Actual=actual, Predicted=predicted))
+  }
+  n = sum(cm) # number of instances
+  nc = nrow(cm) # number of classes
+  diag = diag(cm) # number of correctly classified instances per class
+  rowsums = apply(cm, 1, sum) # number of instances per class
+  colsums = apply(cm, 2, sum) # number of predictions per class
+  p = rowsums / n # distribution of instances over the classes
+  q = colsums / n # distribution of instances over the predicted classes
+  #accuracy
+  accuracy = sum(diag) / n
+  #per class
+  recall = diag / rowsums
+  precision = diag / colsums
+  f1 = 2 * precision * recall / (precision + recall)
+  #macro
+  macroPrecision = mean(precision)
+  macroRecall = mean(recall)
+  macroF1 = mean(f1)
+  #1-vs-all matrix
+  oneVsAll = lapply(1 : nc,
+                    function(i){
+                      v = c(cm[i,i],
+                            rowsums[i] - cm[i,i],
+                            colsums[i] - cm[i,i],
+                            n-rowsums[i] - colsums[i] + cm[i,i]);
+                      return(matrix(v, nrow = 2, byrow = T))})
+  s = matrix(0, nrow=2, ncol=2)
+  for(i in 1:nc){s=s+oneVsAll[[i]]}
+  #avg accuracy
+  avgAccuracy = sum(diag(s))/sum(s)
+  #micro
+  microPrf = (diag(s) / apply(s,1, sum))[1];
+  #majority class
+  mcIndex = which(rowsums==max(rowsums))[1] # majority-class index
+  mcAccuracy = as.numeric(p[mcIndex])
+  mcRecall = 0*p; mcRecall[mcIndex] = 1
+  mcPrecision = 0*p; mcPrecision[mcIndex] = p[mcIndex]
+  mcF1 = 0*p; mcF1[mcIndex] = 2 * mcPrecision[mcIndex] / (mcPrecision[mcIndex] + 1)
+  #random accuracy
+  expAccuracy = sum(p*q)
+  #kappa
+  kappa = (accuracy - expAccuracy) / (1 - expAccuracy)
+  #random guess
+  rgAccuracy = 1 / nc
+  rgPrecision = p
+  rgRecall = 0*p + 1 / nc
+  rgF1 = 2 * p / (nc * p + 1)
+  #rnd weighted
+  rwgAccurcy = sum(p^2)
+  rwgPrecision = p
+  rwgRecall = p
+  rwgF1 = p
+  classNames = names(diag)
+  if(is.null(classNames)) classNames = paste("C",(1:nc),sep="")
+  return(list(
+    ConfusionMatrix = cm,
+    Metrics = data.frame(
+      Class = classNames,
+      Accuracy = accuracy,
+      Precision = precision,
+      Recall = recall,
+      F1 = f1,
+      MacroAvgPrecision = macroPrecision,
+      MacroAvgRecall = macroRecall,
+      MacroAvgF1 = macroF1,
+      AvgAccuracy = avgAccuracy,
+      MicroAvgPrecision = microPrf,
+      MicroAvgRecall = microPrf,
+      MicroAvgF1 = microPrf,
+      MajorityClassAccuracy = mcAccuracy,
+      MajorityClassPrecision = mcPrecision,
+      MajorityClassRecall = mcRecall,
+      MajorityClassF1 = mcF1,
+      Kappa = kappa,
+      RandomGuessAccuracy = rgAccuracy,
+      RandomGuessPrecision = rgPrecision,
+      RandomGuessRecall = rgRecall,
+      RandomGuessF1 = rgF1,
+      RandomWeightedGuessAccurcy = rwgAccurcy,
+      RandomWeightedGuessPrecision = rwgPrecision,
+      RandomWeightedGuessRecall= rwgRecall,
+      RandomWeightedGuessWeightedF1 = rwgF1)))
+}
+
+```
+
+```{r}
+# evaluation metrics for first split
+pred_gbm1 <- as.data.frame(predict(gbm_model1, testingdata1, n.trees = 50,type = "response"))
+names(pred_gbm1) <- gsub(".50", "", names(pred_gbm1))
+pred_gbm1$failure <- as.factor(colnames(pred_gbm1)[max.col(pred_gbm1)])
+eval1 <- Evaluate(actual=testingdata1$failure,predicted=pred_gbm1$failure)
+eval1$ConfusionMatrix
+t(eval1$Metrics)
+```
+```{r}
+# evaluation metrics for second split
+pred_gbm2 <- as.data.frame(predict(gbm_model2, testingdata2, n.trees = 50,type = "response"))
+names(pred_gbm2) <- gsub(".50", "", names(pred_gbm2))
+pred_gbm2$failure <- as.factor(colnames(pred_gbm2)[max.col(pred_gbm2)])
+eval2 <- Evaluate(actual=testingdata2$failure,predicted=pred_gbm2$failure)
+eval2$ConfusionMatrix
+t(eval2$Metrics)
+```
+```{r}
+# evaluation metrics for third split
+pred_gbm3 <- as.data.frame(predict(gbm_model3, testingdata3, n.trees = 50,type = "response"))
+names(pred_gbm3)<-gsub(".50", "", names(pred_gbm3))
+pred_gbm3$failure <- as.factor(colnames(pred_gbm3)[max.col(pred_gbm3)])
+eval3 <- Evaluate(actual=testingdata3$failure,predicted=pred_gbm3$failure)
+eval3$ConfusionMatrix
+t(eval3$Metrics)
+```
+
+```{r}
+# report the RECALL rates for the models
+rownames <- c("comp1","comp2","comp3","comp4","none")
+data.frame(cbind(failure = rownames,
+                 gbm_model1_Recall = eval1$Metrics$Recall,
+                 gbm_model2_Recall = eval2$Metrics$Recall,
+                 gbm_model3_Recall = eval3$Metrics$Recall))
+```
+
